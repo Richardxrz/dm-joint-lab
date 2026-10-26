@@ -178,7 +178,7 @@ static void t_decode_endpoints(void) {
   check_float(45.0, m.fb.temp_rotor, 1e-6, "t_decode: 转子温度 = 45 ℃");
 
   /* 12 位字段跨字节拆分：vel=0x123, tau=0x456 */
-  const uint8_t fb2[8] = {0x00, 0x80, 0x00, 0x12, 0x34, 0x56, 0, 0};
+  const uint8_t fb2[8] = {0x11, 0x80, 0x00, 0x12, 0x34, 0x56, 0, 0};
   DmMotor_OnFrame(&m, 0, fb2, 1010);
   const double v_want = (0x123 / 4095.0) * 20.0 - 10.0;
   const double t_want = (0x456 / 4095.0) * 56.0 - 28.0;
@@ -206,7 +206,7 @@ static void t_timeout(void) {
 
   report(!DmMotor_IsOnline(&m, 500), "t_timeout: 从未收到反馈 → 不在线");
 
-  const uint8_t fb[8] = {0};
+  const uint8_t fb[8] = {0x01, 0, 0, 0, 0, 0, 0, 0};
   DmMotor_OnFrame(&m, 0, fb, 1000);
   report(DmMotor_IsOnline(&m, 1050), "t_timeout: 距上一帧 50 ms（阈 100）→ 在线");
   report(DmMotor_IsOnline(&m, 1100), "t_timeout: 正好 100 ms → 仍在线");
@@ -231,10 +231,69 @@ static void t_two_motors(void) {
   DmMotor_Init(&a, &cfg_a);
   DmMotor_Init(&b, &cfg_b);
 
-  const uint8_t fb[8] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 1, 2};
+  const uint8_t fb[8] = {0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 1, 2};
   DmMotor_OnFrame(&b, 1, fb, 500);
   check_int(0, (long)a.fb.rx_count, "t_two_motors: 第二条轴的反馈不串到第一条轴");
   check_int(1, (long)b.fb.rx_count, "t_two_motors: 第二条轴自己收到 1 帧");
+  check_int(0, (long)a.fb.foreign_cnt, "t_two_motors: 第一条轴不把别人的帧记成 foreign");
+}
+
+static void t_state_decode(void) {
+  FakeBus bus = {0};
+  DmMotor m;
+  DmMotorConfig cfg = make_cfg(&bus);
+  DmMotor_Init(&m, &cfg);
+
+  const struct {
+    uint8_t err;
+    DmState want;
+    bool fault;
+    const char *name;
+  } cases[] = {
+      {0x0, DM_STATE_DISABLED, false, "失能"},
+      {0x1, DM_STATE_ENABLED, false, "使能"},
+      {0x8, DM_STATE_OVER_VOLTAGE, true, "超压"},
+      {0x9, DM_STATE_UNDER_VOLTAGE, true, "欠压"},
+      {0xA, DM_STATE_OVER_CURRENT, true, "过流"},
+      {0xB, DM_STATE_MOS_OVER_TEMP, true, "MOS 过温"},
+      {0xC, DM_STATE_COIL_OVER_TEMP, true, "线圈过温"},
+      {0xD, DM_STATE_COMM_LOST, true, "通讯丢失"},
+      {0xE, DM_STATE_OVERLOAD, true, "过载"},
+  };
+  for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+    uint8_t fb[8] = {0};
+    fb[0] = (uint8_t)((cases[i].err << 4) | 1u);
+    DmMotor_OnFrame(&m, 0, fb, 1000);
+    char buf[96];
+    snprintf(buf, sizeof(buf), "t_state_decode: ERR=0x%X → %s（state=%d）", cases[i].err,
+             cases[i].name, (int)m.fb.state);
+    report(m.fb.state == cases[i].want, buf);
+    snprintf(buf, sizeof(buf), "t_state_decode: ERR=0x%X → IsFault=%d", cases[i].err,
+             (int)cases[i].fault);
+    report(DmState_IsFault(m.fb.state) == cases[i].fault, buf);
+  }
+  /* 未定义的高 4 位值（0xF）不许当故障猜 */
+  uint8_t fb_unknown[8] = {0xF1, 0, 0, 0, 0, 0, 0, 0};
+  DmMotor_OnFrame(&m, 0, fb_unknown, 1000);
+  report(!DmState_IsFault(m.fb.state), "t_state_decode: 未定义 ERR=0xF 不判为故障");
+}
+
+static void t_foreign_id(void) {
+  FakeBus bus = {0};
+  DmMotor a, b;
+  DmMotorConfig cfg_a = make_cfg(&bus); /* can_id 1, feedback_id 0 */
+  DmMotorConfig cfg_b = make_cfg(&bus);
+  cfg_b.can_id = 2; /* 共用同一个 Master ID 0 */
+  DmMotor_Init(&a, &cfg_a);
+  DmMotor_Init(&b, &cfg_b);
+
+  /* 同一 Master ID 下，A 的反馈（D[0]=0x01）不能被 B 吃掉 */
+  const uint8_t fb_a[8] = {0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 60, 45};
+  report(DmMotor_OnFrame(&a, 0, fb_a, 100) == true, "t_foreign_id: A 收到自己的帧");
+  report(DmMotor_OnFrame(&b, 0, fb_a, 100) == false, "t_foreign_id: B 拒收 A 的帧");
+  check_float(0.0, b.fb.pos, 1e-9, "t_foreign_id: B 的位置未被 A 的帧改写");
+  check_int(1, (long)b.fb.foreign_cnt, "t_foreign_id: B 的 foreign_cnt = 1（串轴可见）");
+  check_int(1, (long)a.fb.rx_count, "t_foreign_id: A 的 rx_count 不受影响");
 }
 
 static void t_fail_paths(void) {
@@ -268,6 +327,8 @@ int main(void) {
   t_decode_reject();
   t_timeout();
   t_two_motors();
+  t_state_decode();
+  t_foreign_id();
   t_fail_paths();
   printf("---\n%d 条判据，失败 %d 条\n", g_total, g_fail);
   return g_fail == 0 ? 0 : 1;

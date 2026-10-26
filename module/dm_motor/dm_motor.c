@@ -39,6 +39,21 @@ static float uint_to_float(uint16_t u, float x_min, float x_max, uint8_t bits) {
   return ((float)u / (float)uint_max_for(bits)) * span + x_min;
 }
 
+bool DmState_IsFault(DmState state) {
+  switch (state) {
+  case DM_STATE_OVER_VOLTAGE:
+  case DM_STATE_UNDER_VOLTAGE:
+  case DM_STATE_OVER_CURRENT:
+  case DM_STATE_MOS_OVER_TEMP:
+  case DM_STATE_COIL_OVER_TEMP:
+  case DM_STATE_COMM_LOST:
+  case DM_STATE_OVERLOAD:
+    return true;
+  default:
+    return false;
+  }
+}
+
 DmLimits DmLimits_DM4340(void) {
   DmLimits lim;
   lim.pos_min = -12.5f;
@@ -110,6 +125,13 @@ bool DmMotor_OnFrame(DmMotor *m, uint32_t id, const uint8_t data[CAN_FRAME_DLEN]
   if (id != (uint32_t)m->cfg.feedback_id) {
     return false;
   }
+  /* 手册 p12：D[0] = ID|ERR<<4，低 4 位是电机 ID。共用 Master ID 时靠这一级区分各轴 */
+  const uint8_t id_nibble = (uint8_t)(data[0] & 0x0Fu);
+  const uint8_t err_nibble = (uint8_t)(data[0] >> 4);
+  if (id_nibble != (uint8_t)(m->cfg.can_id & 0x0Fu)) {
+    m->fb.foreign_cnt++;
+    return false;
+  }
 
   const uint16_t p_int = (uint16_t)(((uint16_t)data[1] << 8) | data[2]);
   const uint16_t v_int = (uint16_t)(((uint16_t)data[3] << 4) | (data[4] >> 4));
@@ -121,7 +143,9 @@ bool DmMotor_OnFrame(DmMotor *m, uint32_t id, const uint8_t data[CAN_FRAME_DLEN]
   m->fb.tau = uint_to_float(t_int, lim->tau_min, lim->tau_max, DM_TAU_BITS);
   m->fb.temp_mos = (float)data[6];
   m->fb.temp_rotor = (float)data[7];
-  m->fb.status_raw = data[0];
+  m->fb.id = id_nibble;
+  /* 高 4 位只有低 3 位有定义（0/1/8~E），>0xE 的值不猜，原样截低 4 位存 */
+  m->fb.state = (DmState)err_nibble;
   m->fb.rx_count++;
   m->fb.last_rx_ms = now_ms;
   return true;
