@@ -1,0 +1,2 @@
+/usr/bin/ar qc libdm_module.a CMakeFiles/dm_module.dir/module/dm_motor/dm_motor.c.o
+/usr/bin/ranlib libdm_module.a

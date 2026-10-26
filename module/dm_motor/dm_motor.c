@@ -117,8 +117,7 @@ bool DmMotor_MitCommand(DmMotor *m, float pos, float vel, float kp, float kd, fl
   return CanBus_Send(&m->cfg.bus, m->cfg.can_id, frame);
 }
 
-bool DmMotor_OnFrame(DmMotor *m, uint32_t id, const uint8_t data[CAN_FRAME_DLEN],
-                     uint32_t now_ms) {
+bool DmMotor_OnFrame(DmMotor *m, uint32_t id, const uint8_t data[CAN_FRAME_DLEN], uint32_t now_ms) {
   if (m == NULL || !m->inited || data == NULL) {
     return false;
   }

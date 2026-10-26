@@ -1,0 +1,4 @@
+/Users/a1234/Embedded/dm_joint_lab/out/Debug/CMakeFiles/dm_module.dir
+/Users/a1234/Embedded/dm_joint_lab/out/Debug/CMakeFiles/host_tests.dir
+/Users/a1234/Embedded/dm_joint_lab/out/Debug/CMakeFiles/edit_cache.dir
+/Users/a1234/Embedded/dm_joint_lab/out/Debug/CMakeFiles/rebuild_cache.dir
