@@ -10,6 +10,7 @@
 #include <string.h>
 
 #include "dm_motor.h"
+#include "host_can_port.h"
 
 static int g_fail;
 static int g_total;
@@ -315,6 +316,57 @@ static void t_fail_paths(void) {
   report(!DmMotor_MitCommand(&m2, 0, 0, 0, 0, 0), "t_fail_paths: 总线发送失败 → 命令返回 false");
 }
 
+
+/* ---------- 假端口自检：测试替身本身必须先是对的 ---------- */
+
+static void t_host_port(void) {
+  HostCan hc;
+  HostCan_Init(&hc);
+  CanPort *port = HostCan_Port(&hc);
+  report(CanPort_IsComplete(port), "t_host_port: ops 五项填全（CanPort_IsComplete）");
+
+  uint32_t id = 0;
+  uint8_t buf[CAN_PORT_DLEN] = {0};
+  report(hc.port.ops->recv(hc.port.ctx, &id, buf) == CAN_PORT_EMPTY,
+         "t_host_port: 空 FIFO 的 recv 返回 EMPTY（不是 ERROR）");
+
+  const uint8_t f1[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+  report(HostCan_InjectFrame(&hc, 0x11, f1), "t_host_port: 注入 1 帧成功");
+  check_int(1, HostCan_PendingRx(&hc), "t_host_port: FIFO 里剩 1 帧");
+  report(hc.port.ops->recv(hc.port.ctx, &id, buf) == CAN_PORT_OK, "t_host_port: recv 取到一帧");
+  check_int(0x11, (long)id, "t_host_port: 取回的帧 ID 正确");
+  report(memcmp(buf, f1, 8) == 0, "t_host_port: 取回的 8 字节内容一致");
+  report(hc.port.ops->recv(hc.port.ctx, &id, buf) == CAN_PORT_EMPTY,
+         "t_host_port: 取空后 recv 回到 EMPTY");
+
+  /* FIFO 满：第 9 帧被丢并计数（与真实端口契约一致） */
+  HostCan_Init(&hc);
+  int ok = 0;
+  for (int i = 0; i < (int)HOST_CAN_RX_DEPTH; i++) {
+    ok += HostCan_InjectFrame(&hc, 0x11, f1) ? 1 : 0;
+  }
+  check_int((long)HOST_CAN_RX_DEPTH, ok, "t_host_port: FIFO 满之前全部注入成功");
+  report(!HostCan_InjectFrame(&hc, 0x11, f1), "t_host_port: 第 9 帧被拒");
+  check_int(1, (long)hc.port.ops->dropped(hc.port.ctx),
+            "t_host_port: 溢出计入 dropped");
+
+  /* 发送侧记录 + 强制失败 */
+  HostCan_Init(&hc);
+  const uint8_t t1[8] = {0x7F, 0xFF, 0x7F, 0xF0, 0, 0, 0x07, 0xFF};
+  hc.port.ops->send(hc.port.ctx, 1, t1);
+  hc.port.ops->send(hc.port.ctx, 2, t1);
+  check_int(2, (long)HostCan_SentCount(&hc), "t_host_port: 两次 send 都被记录");
+  uint8_t got[8] = {0};
+  uint32_t gid = 0;
+  report(HostCan_GetSent(&hc, 0, &gid, got) && gid == 1 && memcmp(got, t1, 8) == 0,
+         "t_host_port: 第 0 次发送的 ID 与内容可回看");
+
+  HostCan_SetSendResult(&hc, CAN_PORT_BUSY);
+  report(hc.port.ops->send(hc.port.ctx, 3, t1) == CAN_PORT_BUSY,
+         "t_host_port: 可强制 send 返回 BUSY");
+  check_int(2, (long)HostCan_SentCount(&hc), "t_host_port: 失败的那次不进发送记录");
+}
+
 int main(void) {
   printf("=== dm_motor 规格测试（host，无硬件） ===\n");
   t_limits();
@@ -330,6 +382,7 @@ int main(void) {
   t_state_decode();
   t_foreign_id();
   t_fail_paths();
+  t_host_port();
   printf("---\n%d 条判据，失败 %d 条\n", g_total, g_fail);
   return g_fail == 0 ? 0 : 1;
 }
