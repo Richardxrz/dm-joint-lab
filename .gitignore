@@ -3,3 +3,4 @@ build/
 compile_commands.json
 out/
 tests/bench/
+docs/审查包*
