@@ -7,10 +7,13 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 # ---- module 层：与 MCU 无关，主机可编可测 ----
 add_library(dm_module STATIC
   module/dm_motor/dm_motor.c
+  sdk/bus.c
 )
 target_include_directories(dm_module PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/module/dm_motor
   ${CMAKE_CURRENT_SOURCE_DIR}/platform
+  ${CMAKE_CURRENT_SOURCE_DIR}/sdk
+  ${CMAKE_CURRENT_SOURCE_DIR}/port/inc
 )
 target_compile_options(dm_module PRIVATE -Wall -Wextra -Werror)
 
