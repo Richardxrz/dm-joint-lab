@@ -11,6 +11,7 @@
 
 #include "dm_motor.h"
 #include "host_can_port.h"
+#include "bus.h"
 
 static int g_fail;
 static int g_total;
@@ -367,6 +368,121 @@ static void t_host_port(void) {
   check_int(2, (long)HostCan_SentCount(&hc), "t_host_port: 失败的那次不进发送记录");
 }
 
+
+/* ---------- bus：对象池、订阅、发送 ----------
+ * 注意：Bus 对象池不回收（无 Destroy），所以 create 用例必须排最前，
+ * 之后的用例复用同一个总线实例。这是"静态池"设计带来的测试顺序约束。
+ */
+
+static Bus *g_bus;
+static HostCan g_hc;
+
+static void cb_noop(void *self, uint32_t id, const uint8_t data[SDK_CAN_DLEN]) {
+  (void)self;
+  (void)id;
+  (void)data;
+}
+
+static uint32_t err_mod(sdk_err_t e) { return (uint32_t)(e >> 24); }
+static uint32_t err_rs(sdk_err_t e) { return (uint32_t)(e & 0xFFFFFFu); }
+
+static void t_bus_pool(void) {
+  HostCan_Init(&g_hc);
+  CanPort *port = HostCan_Port(&g_hc);
+
+  Bus *tmp = NULL;
+  report(err_rs(Bus_Create(NULL, &tmp)) == SDK_RS_INVALID_ARG, "t_bus: 端口 NULL → INVALID_ARG");
+  report(err_rs(Bus_Create(port, NULL)) == SDK_RS_INVALID_ARG, "t_bus: 输出指针 NULL → INVALID_ARG");
+
+  Bus *b1 = NULL, *b2 = NULL, *b3 = NULL;
+  report(Bus_Create(port, &b1) == SDK_OK, "t_bus: 创建第 1 条总线");
+  report(Bus_Create(port, &b2) == SDK_OK, "t_bus: 创建第 2 条总线");
+  report(Bus_Create(port, &b3) == SDK_OK, "t_bus: 创建第 3 条总线（= 板载 3 路）");
+
+  Bus *b4 = (Bus *)0x1;
+  sdk_err_t e = Bus_Create(port, &b4);
+  report(err_rs(e) == SDK_RS_NO_RESOURCE, "t_bus: 第 4 条 → NO_RESOURCE（池满）");
+  check_int(1, (long)err_mod(e), "t_bus: 错误码模块号 = BUS(1)");
+  report(b4 == (Bus *)0x1, "t_bus: 失败时没有改写输出指针");
+  check_int(0, (long)Bus_SubCount(b4 == (Bus *)0x1 ? NULL : b4), "t_bus: 野总线 SubCount=0");
+
+  g_bus = b1;
+  check_int(0, (long)Bus_SubCount(g_bus), "t_bus: 新总线订阅数 = 0");
+}
+
+static void t_bus_send(void) {
+  uint8_t frame[SDK_CAN_DLEN] = {0x7F, 0xFF, 0x7F, 0xF0, 0, 0, 0x07, 0xFF};
+  BusStats st = {0};
+
+  report(Bus_Send(g_bus, 1, frame) == SDK_OK, "t_bus_send: 正常发送 → OK");
+  check_int(1, (long)HostCan_SentCount(&g_hc), "t_bus_send: 假端口记录到 1 帧");
+  uint32_t id = 0;
+  uint8_t got[8] = {0};
+  HostCan_GetSent(&g_hc, 0, &id, got);
+  check_int(1, (long)id, "t_bus_send: 发出的帧 ID 正确");
+  report(memcmp(got, frame, 8) == 0, "t_bus_send: 发出的 8 字节正确");
+
+  report(err_rs(Bus_Send(NULL, 1, frame)) == SDK_RS_INVALID_ARG, "t_bus_send: bus NULL → INVALID_ARG");
+  report(err_rs(Bus_Send(g_bus, 0x800, frame)) == SDK_RS_INVALID_ARG,
+         "t_bus_send: 帧 ID > 0x7FF → INVALID_ARG");
+
+  HostCan_SetSendResult(&g_hc, CAN_PORT_BUSY);
+  report(err_rs(Bus_Send(g_bus, 1, frame)) == SDK_RS_BUSY, "t_bus_send: 队列满 → BUSY");
+  check_int(1, (long)HostCan_SentCount(&g_hc), "t_bus_send: 失败的那次没有被发出");
+
+  HostCan_SetSendResult(&g_hc, CAN_PORT_ERROR);
+  report(err_rs(Bus_Send(g_bus, 1, frame)) == SDK_RS_HW_FAULT, "t_bus_send: 硬件错 → HW_FAULT");
+
+  HostCan_SetSendResult(&g_hc, CAN_PORT_OK);
+  report(Bus_Send(g_bus, 1, frame) == SDK_OK, "t_bus_send: 恢复后发送成功");
+
+  report(Bus_GetStats(g_bus, &st) == SDK_OK, "t_bus_send: 取统计快照");
+  check_int(2, (long)st.tx_ok, "t_bus_send: tx_ok = 2（成功两次）");
+  check_int(1, (long)st.tx_busy, "t_bus_send: tx_busy = 1");
+  check_int(1, (long)st.tx_error, "t_bus_send: tx_error = 1");
+  check_int((long)SDK_ERR(SDK_MOD_BUS, SDK_RS_HW_FAULT), (long)st.err_last,
+            "t_bus_send: err_last = 最近一次失败（HW_FAULT 覆盖了更早的 BUSY）");
+  report(err_rs(Bus_GetStats(NULL, &st)) == SDK_RS_INVALID_ARG, "t_bus_send: GetStats(NULL) → INVALID_ARG");
+}
+
+static void t_bus_subscribe(void) {
+  int self_a = 1, self_b = 2;
+
+  report(err_rs(Bus_Subscribe(g_bus, 17, NULL, &self_a)) == SDK_RS_INVALID_ARG,
+         "t_bus_sub: 回调 NULL → INVALID_ARG");
+  report(err_rs(Bus_Subscribe(g_bus, 0x800, cb_noop, &self_a)) == SDK_RS_INVALID_ARG,
+         "t_bus_sub: 帧 ID > 0x7FF → INVALID_ARG");
+
+  report(Bus_Subscribe(g_bus, 17, cb_noop, &self_a) == SDK_OK, "t_bus_sub: 订阅 (17, A)");
+  report(err_rs(Bus_Subscribe(g_bus, 17, cb_noop, &self_a)) == SDK_RS_DUPLICATE,
+         "t_bus_sub: 同 (17, A) 重复 → DUPLICATE");
+  check_int(1, (long)Bus_SubCount(g_bus), "t_bus_sub: 被拒的重复订阅没进表");
+  report(Bus_Subscribe(g_bus, 17, cb_noop, &self_b) == SDK_OK,
+         "t_bus_sub: 同 ID 不同 self（17, B）合法 —— 六轴共用 MST_ID 的前提");
+  check_int(2, (long)Bus_SubCount(g_bus), "t_bus_sub: 订阅数 = 2");
+
+  for (int i = 0; i < (int)SDK_MAX_SUB - 2; i++) {
+    Bus_Subscribe(g_bus, 0x100u + (uint32_t)i, cb_noop, &self_a);
+  }
+  check_int((long)SDK_MAX_SUB, (long)Bus_SubCount(g_bus), "t_bus_sub: 表填满 16 条");
+  report(err_rs(Bus_Subscribe(g_bus, 0x200, cb_noop, &self_a)) == SDK_RS_NO_RESOURCE,
+         "t_bus_sub: 第 17 条 → NO_RESOURCE");
+
+  report(Bus_Unsubscribe(g_bus, 17, &self_b) == SDK_OK, "t_bus_sub: 退订 (17, B)");
+  check_int((long)SDK_MAX_SUB - 1, (long)Bus_SubCount(g_bus), "t_bus_sub: 退订后 -1");
+  report(err_rs(Bus_Unsubscribe(g_bus, 17, &self_b)) == SDK_RS_NOT_FOUND,
+         "t_bus_sub: 重复退订 → NOT_FOUND");
+  report(Bus_Subscribe(g_bus, 0x200, cb_noop, &self_a) == SDK_OK,
+         "t_bus_sub: 腾位后可再订阅（表不是只增不减）");
+
+  /* 清空表，给后续分发用例一个干净状态 */
+  for (uint32_t i = 0; i <= 0x200u; i++) {
+    Bus_Unsubscribe(g_bus, i, &self_a);
+    Bus_Unsubscribe(g_bus, i, &self_b);
+  }
+  check_int(0, (long)Bus_SubCount(g_bus), "t_bus_sub: 清空后订阅数 = 0");
+}
+
 int main(void) {
   printf("=== dm_motor 规格测试（host，无硬件） ===\n");
   t_limits();
@@ -383,6 +499,9 @@ int main(void) {
   t_foreign_id();
   t_fail_paths();
   t_host_port();
+  t_bus_pool();
+  t_bus_send();
+  t_bus_subscribe();
   printf("---\n%d 条判据，失败 %d 条\n", g_total, g_fail);
   return g_fail == 0 ? 0 : 1;
 }
