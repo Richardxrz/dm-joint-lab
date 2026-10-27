@@ -28,16 +28,11 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "config.h"
 #include "err.h"
 
 /** 经典 CAN 一帧的数据长度（本 SDK 不支持 CAN-FD）。 */
 #define SDK_CAN_DLEN 8u
-
-/** 同时可用的总线数。MC02 = FDCAN1 + FDCAN2。 */
-#define SDK_MAX_BUS 2u
-
-/** 每条总线的订阅表容量（一个 6 轴臂 = 6 条订阅，留余量）。 */
-#define SDK_MAX_SUB 32u
 
 /* 硬件端口契约（只有接口，实现归 port/mc02 或 port/host）。
  * 依赖方向：sdk --> port/inc（允许）；sdk --> port/mc02（禁止）。 */

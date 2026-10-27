@@ -1,1 +1,0 @@
-/usr/bin/cc -g -arch arm64 -Wl,-search_paths_first -Wl,-headerpad_max_install_names -fsanitize=address,undefined CMakeFiles/host_tests.dir/tests/host/main.c.o -o host_tests  libdm_module.a /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/lib/libm.tbd
